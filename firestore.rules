@@ -1,0 +1,144 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId} (Auth UID)
+// Fields:
+//   - id: string (required)
+//   - email: string (required)
+//   - phoneNumber: string (optional)
+//   - displayName: string (optional)
+//   - role: string (required, 'super_admin' | 'owner')
+//   - createdAt: timestamp (required)
+//
+// Collection: businesses
+// Document ID: {businessId}
+// Fields:
+//   - id: string (required)
+//   - name: string (required)
+//   - ownerId: string (required, matches users/{userId})
+//   - googlePlaceId: string (optional)
+//   - googleReviewUrl: string (optional)
+//   - createdAt: timestamp (required)
+//   - qrCodeUrl: string (optional)
+//   - address: string (optional)
+//   - settings: map (optional, {showName: bool, showPhone: bool})
+//
+// Collection: reviews
+// Document ID: {reviewId}
+// Fields:
+//   - id: string (required)
+//   - businessId: string (required, matches businesses/{businessId})
+//   - rating: number (required, 1-5)
+//   - comment: string (optional)
+//   - aiGenerated: bool (optional)
+//   - customerName: string (optional)
+//   - customerPhone: string (optional)
+//   - reply: string (optional)
+//   - createdAt: timestamp (required)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin' ||
+          (request.auth.token.email == "pantje3@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.id is string &&
+             data.email is string && isValidEmail(data.email) &&
+             data.role in ['super_admin', 'owner'] &&
+             data.plan in ['free', 'silver', 'gold'] &&
+             data.trialEndsAt is timestamp &&
+             data.createdAt is timestamp &&
+             (!('phoneNumber' in data) || data.phoneNumber is string) &&
+             (!('displayName' in data) || data.displayName is string);
+    }
+
+    function isValidBusiness(data) {
+      return data.id is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.ownerId is string &&
+             data.createdAt is timestamp &&
+             (!('googlePlaceId' in data) || data.googlePlaceId is string) &&
+             (!('googleReviewUrl' in data) || data.googleReviewUrl is string) &&
+             (!('qrCodeUrl' in data) || data.qrCodeUrl is string) &&
+             (!('address' in data) || data.address is string) &&
+             (!('settings' in data) || data.settings is map);
+    }
+
+    function isValidReview(data) {
+      return data.id is string &&
+             data.businessId is string &&
+             data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.createdAt is timestamp &&
+             (!('comment' in data) || (data.comment is string && data.comment.size() < 2000)) &&
+             (!('aiGenerated' in data) || data.aiGenerated is bool) &&
+             (!('customerName' in data) || (data.customerName is string && data.customerName.size() < 100)) &&
+             (!('customerPhone' in data) || (data.customerPhone is string && data.customerPhone.size() < 20)) &&
+             (!('reply' in data) || (data.reply is string && data.reply.size() < 2000));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isSuperAdmin();
+      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data) && 
+                    (request.resource.data.role == 'owner' || isSuperAdmin());
+      allow update: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data) &&
+                    (request.resource.data.role == resource.data.role || isSuperAdmin());
+    }
+
+    match /businesses/{businessId} {
+      allow read: if true; // Publicly readable for review page
+      allow create: if isAuthenticated() && isValidBusiness(request.resource.data) && 
+                    isSuperAdmin(); // Only Super Admin can create businesses (paid feature)
+      allow update: if isAuthenticated() && 
+                    (resource.data.ownerId == request.auth.uid || isSuperAdmin()) &&
+                    isValidBusiness(request.resource.data) &&
+                    request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isAuthenticated() && isSuperAdmin(); // Only Super Admin can delete
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isValidReview(request.resource.data);
+      allow update: if isAuthenticated() && 
+                    (get(/databases/$(database)/documents/businesses/$(resource.data.businessId)).data.ownerId == request.auth.uid || isSuperAdmin()) &&
+                    isValidReview(request.resource.data);
+      allow delete: if isSuperAdmin();
+    }
+  }
+}
